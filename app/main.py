@@ -182,7 +182,7 @@ def export(document_id: str):
         raise HTTPException(409, "Validez la facture avant de l’exporter.")
     output = io.StringIO(newline="")
     writer = csv.writer(output)
-    writer.writerow(LABELS)
+    writer.writerow(LABELS.values())
     values = document.approved
     writer.writerow([
         csv_text(values[field]) if field in {"invoice_number", "supplier"} else values[field]

@@ -73,7 +73,9 @@ def test_import_review_export(client, filename, method, number):
 
     response = client.get(f"{route}/export.csv")
     assert response.status_code == 200
-    assert list(csv.reader(io.StringIO(response.text)))[1] == [
+    header, row = csv.reader(io.StringIO(response.text))
+    assert header == ["Numéro de facture", "Fournisseur", "Date de facture", "Devise", "Total HT", "TVA", "Total TTC"]
+    assert row == [
         number, "Atelier Exemple SRL", "2026-11-12", "EUR", "1000.00", "210.00", "1210.00",
     ]
     assert client.get(f"{route}/export.csv").content == response.content

@@ -1,12 +1,12 @@
-# Intelligent Document Processing · Factures
+# Intelligent Document Processing for Invoices
 
-Ce POC transforme une facture fournisseur en ligne CSV vérifiée. Importez un PDF, un JPEG ou un PNG. L’application lit le texte du PDF ou applique l’OCR aux pages scannées, propose sept champs et les affiche à côté de l’original. Après vérification et correction éventuelle, vous validez la facture et téléchargez le CSV.
+This proof of concept turns a supplier invoice into a verified CSV row. Upload a PDF, JPEG, or PNG. The app reads the PDF text or runs OCR on scanned pages, then displays seven extracted fields next to a preview of the invoice. Review and edit the values, approve the invoice, and download the CSV.
 
-Le mode local utilise **Tesseract et des règles d’extraction**. Il fonctionne sans compte ni clé d’API. Le mode OpenAI optionnel utilise une sortie structurée et transmet les images des pages scannées au modèle configuré.
+The local mode uses **Tesseract and rule-based extraction** and runs without an account or API key. The optional OpenAI mode uses structured outputs and sends scanned page images to the configured model.
 
-## Démarrer avec Docker Compose
+## Run with Docker Compose
 
-**Prérequis** — Docker avec le plugin Compose.
+You need Docker with the Compose plugin and access to this GitHub repository.
 
 ```bash
 git clone https://github.com/e-jaafar/intelligent-document-processing.git
@@ -14,82 +14,82 @@ cd intelligent-document-processing
 docker compose up --build
 ```
 
-Ouvrez [l’interface](http://127.0.0.1:8000) ou la [documentation interactive de l’API](http://127.0.0.1:8000/docs). Compose démarre l’API FastAPI, un worker Celery, Redis et PostgreSQL. Les volumes conservent les documents et leurs statuts après l’arrêt. Pour arrêter les services, lancez `docker compose down`. Ajouter `--volumes` efface toutes les données de la démo.
+Open the [web interface](http://127.0.0.1:8000) or the [interactive API docs](http://127.0.0.1:8000/docs). Compose starts FastAPI, a Celery worker, Redis, and PostgreSQL. Docker volumes preserve the documents and their statuses between runs. Use `docker compose down` to stop the services. Adding `--volumes` deletes all demo data.
 
-### Démonstration en trois factures
+### Try three invoices
 
-Les fichiers de [`examples/`](examples) sont fictifs.
+The invoices in [`examples/`](examples) are synthetic. The interface and CSV column headers are in French.
 
-1. Importez [`facture-native.pdf`](examples/facture-native.pdf). Le résultat indique `pdf-texte`. Vérifiez les sept champs, validez, puis téléchargez le CSV.
-2. Importez [`facture-scanee.pdf`](examples/facture-scanee.pdf) ou [`facture-scanee.png`](examples/facture-scanee.png). Le résultat indique `ocr`. Les champs reconnus dans le mode local affichent un extrait et un numéro de page.
-3. Importez [`facture-a-corriger.pdf`](examples/facture-a-corriger.pdf). Le document affiche un TTC de 1 200,00 pour un HT de 1 000,00 et une TVA de 210,00. La validation est bloquée. Pour cette démonstration fictive, corrigez le TTC à `1210,00` puis validez. Réimportez le même fichier pour voir la détection du doublon.
+1. Upload [`facture-native.pdf`](examples/facture-native.pdf). The method is `pdf-texte`. Review the seven fields, select **Valider la facture**, then download the CSV.
+2. Upload [`facture-scanee.pdf`](examples/facture-scanee.pdf) or [`facture-scanee.png`](examples/facture-scanee.png). The method is `ocr`. In local mode, recognized fields show a source excerpt and page number.
+3. Upload [`facture-a-corriger.pdf`](examples/facture-a-corriger.pdf). The invoice shows a gross total of 1,200.00, a net total of 1,000.00, and VAT of 210.00. The app blocks approval. For this synthetic example, change **Total TTC** to `1210,00` and approve. Upload the same file again to see the duplicate check.
 
-Le CSV contient une ligne par téléchargement, avec virgules comme séparateurs, UTF‑8, date ISO et décimales avec point. Exemple de sortie après validation de la première facture.
+Each download contains one invoice row in UTF-8, with comma separators, an ISO date, and a period as the decimal separator. The first example produces this CSV after approval.
 
 ```csv
 Numéro de facture,Fournisseur,Date de facture,Devise,Total HT,TVA,Total TTC
 DEMO-001,Atelier Exemple SRL,2026-11-12,EUR,1000.00,210.00,1210.00
 ```
 
-## Fonctionnement
+## How it works
 
 ```mermaid
 flowchart LR
-    U["Interface ou API"] --> F["FastAPI · contrôle du fichier et SHA-256"]
-    F --> D["PostgreSQL · statut et résultat"]
-    F --> S["Volume privé · fichiers originaux"]
+    U["Web interface or API"] --> F["FastAPI · file validation and SHA-256"]
+    F --> D["PostgreSQL · status and results"]
+    F --> S["Private volume · original files"]
     F --> R["Redis"]
-    R --> W["Worker Celery"]
+    R --> W["Celery worker"]
     S --> W
-    W --> P["PDFium · lecture PDF"]
-    P -->|Page scannée| O["Tesseract · OCR"]
-    P -->|Texte natif| E["Extraction locale ou OpenAI"]
+    W --> P["PDFium · PDF reading"]
+    P -->|Scanned page| O["Tesseract · OCR"]
+    P -->|Native text| E["Local or OpenAI extraction"]
     O --> E
-    E --> V["Pydantic · types et cohérence HT + TVA"]
+    E --> V["Pydantic · types and net total plus VAT check"]
     V --> D
-    D --> H["Revue et validation humaine"]
-    H --> C["Téléchargement CSV"]
+    D --> H["Human review and approval"]
+    H --> C["CSV download"]
 ```
 
-- **Import.** Le serveur vérifie le format réel, limite l’import à 10 Mio et 10 pages par PDF, et détecte les fichiers identiques par SHA‑256. Deux scans différents d’une même facture peuvent produire deux entrées.
-- **Lecture.** PDFium lit le texte natif. Tesseract lit les images et les pages PDF dont le texte natif contient trop peu de caractères alphanumériques. Le seuil actuel est de 25 caractères par page.
-- **Extraction.** En mode local, des libellés connus en français et en anglais alimentent les sept champs. Les valeurs contradictoires restent vides. Le numéro de facture, le fournisseur, la date, la devise, le HT, la TVA et le TTC sont obligatoires pour valider.
-- **Validation.** Pydantic normalise les dates, la devise et les montants. Le POC accepte des factures positives ou nulles en EUR. Le contrôle utilise `Decimal` et autorise un écart maximal d’un centime entre HT + TVA et TTC. Une TVA manquante exige une vérification et une saisie explicite.
-- **Revue.** Chaque facture extraite passe en revue. Le résultat initial et les valeurs approuvées sont conservés séparément. Après validation, le même document fournit le même CSV à chaque téléchargement. L’application neutralise les débuts de formule dans les champs texte du CSV.
-- **Reprise.** Une extraction en échec peut être relancée depuis l’interface. Une tâche encore en file ou en cours après cinq minutes devient également relançable. Un identifiant de tentative empêche une ancienne tâche de remplacer un résultat récent.
+- **Upload.** The server checks the actual file format, allows files up to 10 MiB and PDFs up to 10 pages, and identifies byte-for-byte duplicates using SHA-256. Two different scans of the same invoice can create two entries.
+- **Read.** PDFium reads native PDF text. Tesseract reads images and PDF pages with fewer than 25 alphanumeric characters in their text layer.
+- **Extract.** In local mode, rules recognize common French and English labels. Conflicting values are left blank. Approval requires an invoice number, supplier, date, currency, net total, VAT amount, and gross total.
+- **Validate.** Pydantic normalizes dates, currency, and amounts. The POC accepts invoices in EUR with nonnegative amounts. The check uses `Decimal` and allows a one-cent difference between net total plus VAT and the gross total. Missing VAT requires an explicit entry during review.
+- **Review.** Every extracted invoice goes through human review. The app stores the extracted values separately from the approved values. Repeated downloads of an approved invoice produce the same CSV. Text values that could be interpreted as spreadsheet formulas are escaped.
+- **Retry.** Use the interface to retry a failed extraction. A task still queued or processing after five minutes also becomes eligible for retry. Each attempt has an ID that prevents an older task from overwriting a newer result.
 
-| Statut | Action possible |
+| Status | Available action |
 |---|---|
-| `queued` / `processing` | Consulter l’aperçu et suivre l’extraction. |
-| `review` | Vérifier les champs, corriger, puis valider. |
-| `approved` | Télécharger le CSV. |
-| `failed` | Consulter le message et relancer. |
+| `queued` / `processing` | View the invoice preview and follow progress. |
+| `review` | Review, correct, and approve the invoice. |
+| `approved` | Download the CSV. |
+| `failed` | Read the error message and retry. |
 
-## Activer OpenAI
+## Enable OpenAI extraction
 
-Copiez `.env.example` vers `.env`, renseignez `OPENAI_API_KEY` et `OPENAI_MODEL` avec une clé et un modèle de votre compte qui accepte les images et les sorties structurées. Redémarrez avec `docker compose up --build -d`.
+Copy `.env.example` to `.env`. Set `OPENAI_API_KEY` and set `OPENAI_MODEL` to a model available to your account that supports image inputs and structured outputs. Restart with `docker compose up --build -d`.
 
-Le mode activé envoie le texte des pages et les images des pages passées par OCR à OpenAI. Il demande le même schéma de champs que le mode local, avec `null` pour les données illisibles ou absentes. La revue humaine reste obligatoire. Le résultat affiche la route `openai-texte` ou `openai-vision` et le nombre de tokens lorsque le fournisseur le renvoie. Utilisez les exemples fictifs pour essayer ce mode. Il peut générer des frais. [Documentation des sorties structurées](https://developers.openai.com/api/docs/guides/structured-outputs) · [Documentation des entrées image](https://developers.openai.com/api/docs/guides/images-vision)
+This mode sends page text and images of pages processed by OCR to OpenAI. It uses the same invoice fields as local mode and requests `null` for missing or unreadable values. Each invoice still requires human approval. The app shows `openai-texte` or `openai-vision` and displays token usage when returned by the provider. Use the synthetic examples when trying this mode. API usage may incur charges. [Structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs) · [Image inputs](https://developers.openai.com/api/docs/guides/images-vision)
 
 ## API
 
-| Méthode et chemin | Usage |
+| Method and path | Purpose |
 |---|---|
-| `POST /documents` | Import multipart, champ `file`. Réponse `202` avec l’identifiant et l’indicateur `duplicate`. |
-| `GET /documents` | Liste des 100 documents les plus récemment mis à jour. |
-| `GET /documents/{id}` | Statut, champs, sources locales, anomalies, durée et possibilité de relance. |
-| `GET /documents/{id}/preview/{page}` | Aperçu PNG, pages numérotées à partir de 1. |
-| `POST /documents/{id}/retry` | Relance une tentative en échec ou bloquée. |
-| `POST /documents/{id}/approve` | Valide un corps JSON avec `attempt` et les sept champs dans `invoice`. Les montants sont des chaînes. |
-| `GET /documents/{id}/export.csv` | Télécharge le CSV d’une facture approuvée. |
+| `POST /documents` | Upload using the multipart `file` field. Returns `202` with the document ID and the `duplicate` flag. |
+| `GET /documents` | List the 100 most recently updated documents. |
+| `GET /documents/{id}` | Get the status, fields, local source excerpts, validation notes, duration, and retry eligibility. |
+| `GET /documents/{id}/preview/{page}` | Get a PNG preview. Page numbering starts at 1. |
+| `POST /documents/{id}/retry` | Retry a failed or stalled attempt. |
+| `POST /documents/{id}/approve` | Approve a JSON payload with `attempt` and the seven fields under `invoice`. Send amounts as strings. |
+| `GET /documents/{id}/export.csv` | Download the CSV for an approved invoice. |
 
 ```bash
 curl -F "file=@examples/facture-native.pdf" http://127.0.0.1:8000/documents
 ```
 
-## Développement et tests
+## Local development and tests
 
-Pour exécuter la démo locale sans Docker, installez Python 3.13 et Tesseract avec les données anglaises. Ce mode utilise SQLite et exécute le traitement dans la requête d’import. Avec le mode Compose, l’API renvoie la réponse d’import pendant que le worker traite le document.
+To run without Docker, install Python 3.13 and Tesseract with the English language data. This mode uses SQLite and processes documents during the upload request. In Compose, the API returns the upload response while a separate worker processes the document.
 
 ```bash
 python3.13 -m venv .venv
@@ -98,12 +98,19 @@ python -m pip install -r requirements-dev.txt
 CELERY_EAGER=1 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Dans un terminal avec le même environnement virtuel, lancez `python -m pytest -q tests`. Les tests utilisent de vrais PDF, PNG et appels Tesseract, une base temporaire et un échec d’extraction simulé pour vérifier la relance. Pour tester la pile asynchrone, démarrez Compose avec des volumes de test neufs et lancez `IDP_TEST_URL=http://127.0.0.1:8000 python -m pytest -q tests`. GitHub Actions exécute les deux parcours. Pour régénérer les exemples, utilisez `python examples/generate.py`.
+Run `python -m pytest -q tests` in the same virtual environment. The tests use real PDF and PNG files, Tesseract, a temporary database, and a simulated extraction failure to check retries. To test the asynchronous stack, start Compose with fresh test volumes and run `IDP_TEST_URL=http://127.0.0.1:8000 python -m pytest -q tests`. GitHub Actions runs both paths. Run `python examples/generate.py` to regenerate the fixtures.
 
-Le code est réparti entre `app/main.py` pour l’API, `app/tasks.py` pour le traitement asynchrone, `app/extraction.py` pour PDFium, Tesseract et OpenAI, `app/invoice.py` pour les règles de facture, `app/db.py` pour la persistance et `app/static/` pour l’interface.
+| Path | Responsibility |
+|---|---|
+| `app/main.py` | HTTP API, review, and CSV export |
+| `app/tasks.py` | Celery processing and retry state |
+| `app/extraction.py` | PDFium, Tesseract, and optional OpenAI extraction |
+| `app/invoice.py` | Invoice fields and validation rules |
+| `app/db.py` | Persistence |
+| `app/static/` | Web interface |
 
-## Mesures et périmètre
+## Metrics and scope
 
-L’interface affiche la durée d’extraction et, en mode OpenAI, le volume de tokens. L’exactitude par champ et le coût par facture nécessitent un corpus annoté et les tarifs applicables au modèle. La revue est systématique dans ce POC, donc le taux de traitement sans intervention est de 0 %.
+The interface shows extraction time and, in OpenAI mode, token usage. Measuring per-field accuracy and cost per invoice requires a labeled dataset and the rates for the selected model. The POC reviews every invoice manually, so the rate of processing without human intervention is 0%.
 
-Cette démo est prévue pour un poste local avec des documents de test. Elle n’implémente ni authentification, ni gestion multi-entreprise. Le CSV est générique et l’import dans un ERP réel reste à vérifier. Les lignes de facture, contrats, lots, rapprochements métier et exports automatiques sont des extensions du produit.
+This demo is designed for local use with test documents. It has no authentication or tenant isolation. The CSV uses a generic format and has yet to be tested against a live ERP. Line-item extraction, contracts, batch uploads, business-level duplicate detection, and automatic exports are outside the current scope.

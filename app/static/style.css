@@ -1,0 +1,48 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #152625;
+  background: #f5f7f5;
+  line-height: 1.5;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; }
+header, main { padding: 1.5rem clamp(1rem, 4vw, 3rem); }
+header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; border-bottom: 1px solid #ccd6d1; }
+h1, h2 { margin: 0; line-height: 1.2; overflow-wrap: anywhere; }
+h1 { font-size: clamp(1.35rem, 3vw, 2rem); }
+h2 { font-size: 1.2rem; }
+main { display: grid; grid-template-columns: minmax(14rem, 18rem) minmax(0, 1fr); gap: 2rem; }
+aside { padding-right: 1rem; border-right: 1px solid #ccd6d1; }
+form, #fields { display: grid; gap: .65rem; }
+#upload { margin-bottom: 2rem; }
+label { font-weight: 600; }
+input { font: inherit; width: 100%; padding: .4rem; border: 1px solid #788d83; border-radius: .3rem; background: white; }
+small { color: #42554d; overflow-wrap: anywhere; }
+button, #export { font: inherit; padding: .45rem .8rem; border: 1px solid #195841; border-radius: .3rem; background: #195841; color: white; cursor: pointer; }
+button:disabled { opacity: .55; cursor: default; }
+a { color: #195841; }
+#documents { padding: 0; list-style: none; }
+#documents li { margin-bottom: .5rem; }
+#documents button { width: 100%; text-align: left; color: #152625; background: white; border-color: #788d83; overflow-wrap: anywhere; }
+#documents button[aria-current="true"] { border-color: #195841; box-shadow: inset 3px 0 #195841; }
+#documents small { display: block; }
+#notice:empty { display: none; }
+#notice { color: #953719; }
+#retry { margin-bottom: 1rem; }
+.review { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(13rem, 1fr); gap: 1.25rem; }
+.preview { align-self: start; border: 1px solid #ccd6d1; background: #e8eeea; }
+nav { display: flex; justify-content: center; align-items: center; gap: .65rem; padding: .5rem; }
+#preview { display: block; width: 100%; }
+#fields label { display: grid; gap: .2rem; }
+#fields small { display: block; }
+#export { display: inline-block; margin-top: .8rem; }
+#notes { color: #953719; padding-left: 1.15rem; }
+#notes:empty { display: none; }
+@media (max-width: 850px) {
+  main { grid-template-columns: 1fr; }
+  aside { border-right: 0; border-bottom: 1px solid #ccd6d1; padding: 0; }
+}
+@media (max-width: 560px) {
+  .review { grid-template-columns: 1fr; }
+}

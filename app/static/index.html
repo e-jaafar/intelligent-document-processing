@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Factures · IDP</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Traitement des factures</h1>
+    <a href="/docs">Documentation API</a>
+  </header>
+  <main>
+    <aside aria-label="Documents importés">
+      <form id="upload">
+        <label for="file">Importer une facture</label>
+        <input id="file" name="file" type="file" accept=".pdf,.png,.jpg,.jpeg" required>
+        <small>PDF, JPEG ou PNG · 10 Mio maximum</small>
+        <button type="submit">Importer</button>
+      </form>
+      <h2>Documents</h2>
+      <ul id="documents"></ul>
+    </aside>
+    <div>
+      <p id="notice" role="status"></p>
+      <p id="empty">Importez ou sélectionnez une facture pour commencer.</p>
+      <section id="detail" hidden aria-labelledby="filename">
+        <h2 id="filename"></h2>
+        <p id="status"></p>
+        <button id="retry" hidden>Relancer l’extraction</button>
+        <div class="review">
+          <div class="preview">
+            <nav aria-label="Pages de la facture">
+              <button id="previous" type="button" aria-label="Page précédente">←</button>
+              <span id="page" aria-live="polite"></span>
+              <button id="next" type="button" aria-label="Page suivante">→</button>
+            </nav>
+            <img id="preview" alt="Aperçu de la facture">
+          </div>
+          <div>
+            <ul id="notes"></ul>
+            <form id="invoice" hidden>
+              <div id="fields"></div>
+              <button id="approve" type="submit">Valider la facture</button>
+            </form>
+            <a id="export" hidden>Télécharger le CSV</a>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

@@ -3,89 +3,184 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Factures · IDP</title>
+  <meta name="description" content="Relecture des factures fournisseurs : extraction, contrôle des lignes et export CSV.">
+  <meta name="color-scheme" content="light">
+  <title>Relecture des factures</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f5c46'/%3E%3Cpath d='M10 9h12M10 14h12M10 19h7' stroke='%23fff' stroke-width='2.4' stroke-linecap='round'/%3E%3Cpath d='m18.5 22 2.2 2.2 4.3-4.7' stroke='%23fff' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
-  <header>
-    <h1>Traitement des factures</h1>
-    <a href="/docs">Documentation API</a>
-  </header>
-  <main>
-    <aside aria-label="Documents importés">
+  <a class="skip-link" href="#workspace">Aller au contenu</a>
+  <div class="app">
+    <aside class="rail" aria-label="Documents importés">
+      <p class="brand">
+        <svg aria-hidden="true" viewBox="0 0 32 32"><rect width="32" height="32" rx="7"/><path d="M10 9h12M10 14h12M10 19h7"/><path d="m18.5 22 2.2 2.2 4.3-4.7"/></svg>
+        Relecture des factures
+      </p>
+
       <form id="upload">
-        <label for="file">Importer une facture</label>
-        <input id="file" name="file" type="file" accept=".pdf,.png,.jpg,.jpeg" required>
-        <small>PDF, JPEG ou PNG · 10 Mio maximum</small>
-        <button type="submit">Importer</button>
+        <input id="file" name="file" type="file" accept=".pdf,.png,.jpg,.jpeg" class="visually-hidden">
+        <label for="file" class="drop-zone" id="drop-zone">
+          <span class="drop-title">Importer une facture</span>
+          <span class="drop-hint">Choisir ou déposer un PDF, JPEG ou PNG · 10 Mio</span>
+        </label>
       </form>
-      <h2>Documents</h2>
-      <ul id="documents"></ul>
-      <section id="metrics-panel" aria-labelledby="metrics-title">
-        <h2 id="metrics-title">Mesures</h2>
-        <dl id="metrics"></dl>
-        <details id="field-accuracy-details">
-          <summary>Précision par champ</summary>
-          <dl id="field-accuracy"></dl>
-        </details>
-        <label for="baseline">Temps actuel par facture (minutes)</label>
-        <input id="baseline" type="number" min="0" step="0.5" inputmode="decimal">
-        <p id="gain" aria-live="polite"></p>
-        <a href="/metrics.csv">Détail par facture (CSV)</a>
-      </section>
+
+      <div class="rail-heading">
+        <h2>Documents</h2>
+        <span id="doc-count" class="count"></span>
+      </div>
+      <ul id="documents" class="doc-list"></ul>
+
+      <div class="rail-footer">
+        <button id="show-metrics" type="button" class="rail-link" aria-pressed="false">
+          <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 16V9M10 16V4M16 16v-5"/></svg>
+          Mesures
+        </button>
+        <a class="rail-link" href="/docs">
+          <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 6-4 4 4 4M13 6l4 4-4 4"/></svg>
+          API
+        </a>
+      </div>
     </aside>
-    <div>
+
+    <main id="workspace" tabindex="-1">
       <p id="notice" role="status"></p>
-      <p id="empty">Importez ou sélectionnez une facture pour commencer.</p>
+
+      <section id="empty" class="empty" aria-labelledby="empty-title">
+        <h1 id="empty-title">Aucune facture ouverte</h1>
+        <p>Importez une facture ou choisissez-en une dans la liste. L’outil lit les champs et les lignes, puis vous les fait relire avant l’export.</p>
+        <ol class="steps">
+          <li><strong>Importer</strong><span>PDF natif, scan PDF ou photo.</span></li>
+          <li><strong>Relire</strong><span>Cliquez un champ pour voir où il a été lu. Les écarts de calcul sont signalés.</span></li>
+          <li><strong>Exporter</strong><span>Une ligne CSV pour la facture, une par ligne de facture.</span></li>
+        </ol>
+      </section>
+
+      <section id="metrics-view" hidden aria-labelledby="metrics-title">
+        <header class="view-header">
+          <h1 id="metrics-title">Mesures</h1>
+          <p>Calculées sur les factures validées, en comparant les valeurs validées à celles extraites.</p>
+        </header>
+        <div class="stats">
+          <div class="stat stat-main">
+            <span class="stat-label">Relecture médiane</span>
+            <strong id="stat-review" class="stat-value">—</strong>
+            <span id="stat-review-detail" class="stat-detail"></span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Champs justes</span>
+            <strong id="stat-fields" class="stat-value">—</strong>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Lignes justes</span>
+            <strong id="stat-lines" class="stat-value">—</strong>
+            <span id="stat-lines-detail" class="stat-detail"></span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Validées sans correction</span>
+            <strong id="stat-clean" class="stat-value">—</strong>
+            <span id="stat-approved" class="stat-detail"></span>
+          </div>
+        </div>
+        <div class="metrics-columns">
+          <section class="panel" aria-labelledby="baseline-title">
+            <h2 id="baseline-title">Comparer au processus actuel</h2>
+            <label for="baseline" class="field-label">Temps actuel par facture, en minutes</label>
+            <input id="baseline" type="number" min="0" step="0.5" inputmode="decimal" placeholder="Par exemple 4">
+            <p id="gain" aria-live="polite"></p>
+            <p class="muted">Gardé dans ce navigateur uniquement.</p>
+          </section>
+          <section class="panel" aria-labelledby="accuracy-title">
+            <h2 id="accuracy-title">Précision par champ</h2>
+            <dl id="field-accuracy" class="meters"></dl>
+          </section>
+        </div>
+        <p class="metrics-footer">
+          <span id="stat-discrepancies"></span>
+          <a href="/metrics.csv">Télécharger le détail par facture (CSV)</a>
+        </p>
+      </section>
+
       <section id="detail" hidden aria-labelledby="filename">
-        <h2 id="filename"></h2>
-        <p id="status"></p>
-        <button id="retry" hidden>Relancer l’extraction</button>
+        <header class="doc-header">
+          <div class="doc-title">
+            <h1 id="filename"></h1>
+            <p class="doc-meta"><span id="status-chip" class="chip"></span><span id="status"></span></p>
+          </div>
+          <div class="doc-actions">
+            <button id="retry" type="button" class="button secondary" hidden>Relancer l’extraction</button>
+            <a id="export" class="button secondary" hidden download>CSV facture</a>
+            <a id="export-lines" class="button secondary" hidden download>CSV des lignes</a>
+          </div>
+        </header>
+
+        <div id="processing" class="processing" hidden>
+          <div class="progress" aria-hidden="true"><span></span></div>
+          <p>Lecture du document. Les champs apparaîtront ici dès la fin de l’extraction.</p>
+        </div>
+
+        <div id="duplicates" class="callout warn" hidden>
+          <p class="callout-title">Doublon possible</p>
+          <p>Même fournisseur et même numéro que :</p>
+          <ul id="duplicate-list"></ul>
+        </div>
+
+        <div id="notes-box" class="callout" hidden>
+          <p id="notes-title" class="callout-title"></p>
+          <ul id="notes"></ul>
+        </div>
+
         <div class="review">
           <div class="preview">
-            <nav aria-label="Pages de la facture">
-              <button id="previous" type="button" aria-label="Page précédente">←</button>
+            <nav class="pager" aria-label="Pages de la facture">
+              <button id="previous" type="button" class="icon-button" aria-label="Page précédente">
+                <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m12 5-5 5 5 5"/></svg>
+              </button>
               <span id="page" aria-live="polite"></span>
-              <button id="next" type="button" aria-label="Page suivante">→</button>
+              <button id="next" type="button" class="icon-button" aria-label="Page suivante">
+                <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m8 5 5 5-5 5"/></svg>
+              </button>
             </nav>
             <div class="page-view">
-              <img id="preview" alt="Aperçu de la facture">
+              <img id="preview" alt="Aperçu de la page de la facture">
               <div id="highlight" hidden></div>
             </div>
           </div>
-          <div>
-            <div id="duplicates" hidden>
-              <p>Doublon possible : même fournisseur et même numéro que</p>
-              <ul id="duplicate-list"></ul>
-            </div>
-            <ul id="notes"></ul>
-            <form id="invoice" hidden>
-              <div id="fields"></div>
-              <label class="check" id="accept-label">
-                <input id="accept" type="checkbox">
-                Les écarts figurent sur la facture originale : valider telle quelle
-              </label>
-              <button id="approve" type="submit">Valider la facture</button>
-            </form>
-            <a id="export" hidden>Télécharger le CSV</a>
-            <a id="export-lines" hidden>CSV des lignes</a>
-          </div>
+
+          <form id="invoice" hidden novalidate>
+            <fieldset>
+              <legend>Identification</legend>
+              <div id="fields-identity" class="field-grid"></div>
+            </fieldset>
+            <fieldset>
+              <legend>Montants</legend>
+              <div id="fields-amounts" class="field-grid amounts"></div>
+              <p id="totals-check" class="check-line"></p>
+            </fieldset>
+          </form>
         </div>
-        <section id="lines-section" hidden aria-labelledby="lines-title">
-          <h3 id="lines-title">Lignes de facture</h3>
-          <p id="lines-summary" aria-live="polite"></p>
+
+        <section id="lines-section" class="lines" hidden aria-labelledby="lines-title">
+          <header class="lines-header">
+            <div>
+              <h2 id="lines-title">Lignes de facture</h2>
+              <p id="lines-summary" aria-live="polite"></p>
+            </div>
+            <button id="add-line" type="button" class="button secondary">Ajouter une ligne</button>
+          </header>
           <div class="table">
             <table>
               <thead>
                 <tr>
-                  <th scope="col">#</th>
+                  <th scope="col" class="col-index">#</th>
                   <th scope="col">Description</th>
-                  <th scope="col">Quantité</th>
-                  <th scope="col">Prix unitaire</th>
-                  <th scope="col">Remise (%)</th>
-                  <th scope="col">Montant</th>
-                  <th scope="col">Calculé</th>
+                  <th scope="col" class="num">Quantité</th>
+                  <th scope="col" class="num">Prix unitaire</th>
+                  <th scope="col" class="num">Remise %</th>
+                  <th scope="col" class="num">Montant</th>
+                  <th scope="col" class="num">Calculé</th>
                   <th scope="col">Source</th>
                   <th scope="col"><span class="visually-hidden">Actions</span></th>
                 </tr>
@@ -93,15 +188,28 @@
               <tbody id="lines"></tbody>
             </table>
           </div>
-          <button id="add-line" type="button" class="secondary">Ajouter une ligne</button>
         </section>
+
+        <div id="action-bar" class="action-bar" hidden>
+          <label class="check" id="accept-label">
+            <input id="accept" type="checkbox">
+            <span>Les écarts figurent sur la facture originale : valider telle quelle</span>
+          </label>
+          <span id="action-state" class="action-state"></span>
+          <button id="approve" type="submit" form="invoice" class="button primary">
+            Valider la facture <kbd id="shortcut">Ctrl ↵</kbd>
+          </button>
+        </div>
       </section>
-    </div>
-  </main>
+    </main>
+  </div>
+
   <figure id="crop-figure" hidden>
     <figcaption>
       <span id="crop-caption"></span>
-      <button id="crop-close" type="button" class="secondary" aria-label="Fermer la zone source">×</button>
+      <button id="crop-close" type="button" class="icon-button" aria-label="Fermer la zone source">
+        <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg>
+      </button>
     </figcaption>
     <canvas id="crop" role="img" aria-labelledby="crop-caption"></canvas>
   </figure>

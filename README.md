@@ -20,7 +20,7 @@ Open the [web interface](http://127.0.0.1:8000) or the [interactive API docs](ht
 
 The invoices in [`examples/`](examples) are synthetic. The interface and CSV column headers are in French.
 
-1. Upload [`facture-native.pdf`](examples/facture-native.pdf). The method is `pdf-texte`. Review the seven fields, select **Valider la facture**, then download the CSV.
+1. Upload [`facture-native.pdf`](examples/facture-native.pdf) by choosing it or dropping it anywhere on the page. The method is `pdf-texte`. Review the seven fields, select **Valider la facture** or press Ctrl+Enter (⌘+Enter on a Mac), then select **CSV facture**.
 2. Upload [`facture-scanee.pdf`](examples/facture-scanee.pdf) or [`facture-scanee.png`](examples/facture-scanee.png). The method is `ocr`. In local mode, recognized fields show a source excerpt and page number. Select a field to frame its zone on the page and show it enlarged. Upload the other format next: it is a second scan of the same invoice, so the app shows it as a possible duplicate and refuses to approve it a second time.
 3. Upload [`facture-a-corriger.pdf`](examples/facture-a-corriger.pdf). The invoice shows a gross total of 1,200.00, a net total of 1,000.00, and VAT of 210.00. The app blocks approval. For this synthetic example, change **Total TTC** to `1210,00` and approve. Upload the same file again to see the duplicate check.
 4. Upload [`facture-lignes-2-pages.pdf`](examples/facture-lignes-2-pages.pdf). Its 46-line table continues on page 2, with *A reporter* and *Report* carry-forward rows that are skipped, and two lines discounted by 10 %. Select **p. 2** in the **Source** column to show the page a line comes from.
@@ -125,11 +125,11 @@ Run `python -m pytest -q tests` in the same virtual environment. The tests use r
 
 ## Metrics and scope
 
-The **Mesures** panel compares each approved invoice with what was extracted, so the approved values serve as labels.
+The **Mesures** view, opened from the sidebar, compares each approved invoice with what was extracted, so the approved values serve as labels.
 
 - **Review time.** The interface counts the time an invoice spends open in review while the page is visible, and sends it with the approval. Enter the bookkeeper's current time per invoice under **Temps actuel par facture** to compare the median. The value is kept in the browser.
 - **Accuracy.** For each header field, the share of approved invoices whose extracted value was kept. For lines, the share of approved lines that were extracted exactly. *Sans correction* is the share of invoices approved without any change.
-- **Detail.** **Détail par facture (CSV)** lists, for each invoice, the method, the extraction and review times, the corrected fields, the line counts, and the accepted differences.
+- **Detail.** **Télécharger le détail par facture (CSV)** lists, for each invoice, the method, the extraction and review times, the corrected fields, the line counts, and the accepted differences.
 
 These measures are only as good as the review: a value approved without checking counts as correct. The interface also shows extraction time and, in OpenAI mode, token usage. Cost per invoice requires the rates for the selected model. Every invoice is still reviewed manually.
 

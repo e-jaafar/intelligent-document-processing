@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .db import Base, Document, Session, engine
 from .extraction import MAX_BYTES, inspect_upload, preview
-from .invoice import LABELS, Invoice
+from .invoice import LABELS, LINE_LABELS, Invoice
 from .tasks import STALE_AFTER_SECONDS, enqueue
 
 STATIC = Path(__file__).with_name("static")
@@ -172,24 +172,44 @@ def approve(document_id: str, review: Review):
 
 
 def csv_text(value: str) -> str:
-    return "'" + value if value.lstrip().startswith(("=", "+", "-", "@")) else value
+    return "'" + value if value.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")) else value
+
+
+def approved_document(document_id: str) -> Document:
+    document = get_document(document_id)
+    if document.status != "approved":
+        raise HTTPException(409, "Validez la facture avant de l’exporter.")
+    return document
+
+
+def csv_response(rows: list[list], filename: str) -> Response:
+    output = io.StringIO(newline="")
+    csv.writer(output).writerows(rows)
+    return Response(
+        output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/documents/{document_id}/export.csv")
 def export(document_id: str):
-    document = get_document(document_id)
-    if document.status != "approved":
-        raise HTTPException(409, "Validez la facture avant de l’exporter.")
-    output = io.StringIO(newline="")
-    writer = csv.writer(output)
-    writer.writerow(LABELS.values())
+    document = approved_document(document_id)
     values = document.approved
-    writer.writerow([
-        csv_text(values[field]) if field in {"invoice_number", "supplier"} else values[field]
-        for field in LABELS
-    ])
-    return Response(
-        output.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="invoice-{document.id}.csv"'},
-    )
+    return csv_response([
+        list(LABELS.values()),
+        [csv_text(values[field]) if field in {"invoice_number", "supplier"} else values[field] for field in LABELS],
+    ], f"invoice-{document.id}.csv")
+
+
+@app.get("/documents/{document_id}/lines.csv")
+def export_lines(document_id: str):
+    document = approved_document(document_id)
+    values = document.approved
+    rows = [[LABELS["invoice_number"], "Ligne", *LINE_LABELS.values()]]
+    for number, line in enumerate(values.get("lines", []), 1):
+        rows.append([
+            csv_text(values["invoice_number"]), number, csv_text(line["description"]),
+            line["quantity"], line["unit_price"], line["discount_percent"], line["amount"],
+        ])
+    return csv_response(rows, f"invoice-{document.id}-lines.csv")

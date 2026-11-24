@@ -9,7 +9,7 @@ from sqlalchemy import update
 
 from .db import Document, Session
 from .extraction import extract
-from .invoice import LABELS, Invoice
+from .invoice import Invoice, field_label
 
 logger = logging.getLogger(__name__)
 celery = Celery("idp", broker=os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"))
@@ -45,7 +45,7 @@ def process_document(document_id: str, attempt: str) -> None:
         try:
             result["notes"] = Invoice.model_validate(fields).inconsistencies()
         except ValidationError as exc:
-            result["notes"] = [f"{LABELS[error['loc'][0]]} à vérifier." for error in exc.errors()]
+            result["notes"] = list(dict.fromkeys(f"{field_label(error['loc'])} à vérifier." for error in exc.errors()))
         result.update(extraction={"fields": fields, "sources": sources}, method=method, model_tokens=tokens)
     except Exception as exc:
         logger.warning("Extraction %s en échec (%s)", document_id, type(exc).__name__)

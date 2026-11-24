@@ -1,6 +1,6 @@
 # Intelligent Document Processing for Invoices
 
-This proof of concept turns a supplier invoice into a verified CSV row. Upload a PDF, JPEG, or PNG. The app reads the PDF text or runs OCR on scanned pages, then displays seven extracted fields next to a preview of the invoice. Review and edit the values, approve the invoice, and download the CSV.
+This proof of concept turns a supplier invoice into a verified CSV row. Upload a PDF, JPEG, or PNG. The app reads the PDF text or runs OCR on scanned pages, then displays seven extracted header fields and the line table next to a preview of the invoice. Each line is checked: quantity × unit price, less any discount, must match the printed amount, and the lines must add up to the net total. Review and correct the values, approve the invoice, and download the CSV files.
 
 The local mode uses **Tesseract and rule-based extraction** and runs without an account or API key. The optional OpenAI mode uses structured outputs and sends scanned page images to the configured model.
 
@@ -16,19 +16,29 @@ docker compose up --build
 
 Open the [web interface](http://127.0.0.1:8000) or the [interactive API docs](http://127.0.0.1:8000/docs). Compose starts FastAPI, a Celery worker, Redis, and PostgreSQL. Docker volumes preserve the documents and their statuses between runs. Use `docker compose down` to stop the services. Adding `--volumes` deletes all demo data.
 
-### Try three invoices
+### Try the example invoices
 
 The invoices in [`examples/`](examples) are synthetic. The interface and CSV column headers are in French.
 
 1. Upload [`facture-native.pdf`](examples/facture-native.pdf). The method is `pdf-texte`. Review the seven fields, select **Valider la facture**, then download the CSV.
 2. Upload [`facture-scanee.pdf`](examples/facture-scanee.pdf) or [`facture-scanee.png`](examples/facture-scanee.png). The method is `ocr`. In local mode, recognized fields show a source excerpt and page number.
 3. Upload [`facture-a-corriger.pdf`](examples/facture-a-corriger.pdf). The invoice shows a gross total of 1,200.00, a net total of 1,000.00, and VAT of 210.00. The app blocks approval. For this synthetic example, change **Total TTC** to `1210,00` and approve. Upload the same file again to see the duplicate check.
+4. Upload [`facture-lignes-2-pages.pdf`](examples/facture-lignes-2-pages.pdf). Its 46-line table continues on page 2, with *A reporter* and *Report* carry-forward rows that are skipped, and two lines discounted by 10 %. Select **p. 2** in the **Source** column to show the page a line comes from.
+5. Upload [`facture-ecart-ligne.pdf`](examples/facture-ecart-ligne.pdf). Line 1 prints 54,40 for 12 × 4,20, so the row is highlighted and approval is blocked. Correcting the amount to `50,40` then reveals that the lines no longer add up to the printed net total.
+6. Upload [`avoir.pdf`](examples/avoir.pdf). This credit note keeps its negative quantities and amounts in both CSV files.
 
-Each download contains one invoice row in UTF-8, with comma separators, an ISO date, and a period as the decimal separator. The first example produces this CSV after approval.
+The invoice download contains one invoice row in UTF-8, with comma separators, an ISO date, and a period as the decimal separator. The first example produces this CSV after approval.
 
 ```csv
 Numéro de facture,Fournisseur,Date de facture,Devise,Total HT,TVA,Total TTC
 DEMO-001,Atelier Exemple SRL,2026-11-12,EUR,1000.00,210.00,1210.00
+```
+
+When the invoice has lines, **CSV des lignes** downloads one row per line, joined to the invoice by its number. The discount column is a percentage.
+
+```csv
+Numéro de facture,Ligne,Description,Quantité,Prix unitaire,Remise (%),Montant
+DEMO-004,4,Cheville nylon 8 mm - lot 4,26,0.09,10,2.11
 ```
 
 ## How it works
@@ -54,7 +64,8 @@ flowchart LR
 - **Upload.** The server checks the actual file format, allows files up to 10 MiB and PDFs up to 10 pages, and identifies byte-for-byte duplicates using SHA-256. Two different scans of the same invoice can create two entries.
 - **Read.** PDFium reads native PDF text. Tesseract reads images and PDF pages with fewer than 25 alphanumeric characters in their text layer.
 - **Extract.** In local mode, rules recognize common French and English labels. Conflicting values are left blank. Approval requires an invoice number, supplier, date, currency, net total, VAT amount, and gross total.
-- **Validate.** Pydantic normalizes dates, currency, and amounts. The POC accepts invoices in EUR with nonnegative amounts. The check uses `Decimal` and allows a one-cent difference between net total plus VAT and the gross total. Missing VAT requires an explicit entry during review.
+- **Extract lines.** In local mode, the line table starts at a header row naming a description and an amount column, may continue on later pages, and ends at the net or gross total. Each row reads *description, quantity, unit price, optional discount %, net amount*, which is the layout of the pilot supplier. Carry-forward rows are skipped. Rows whose description wraps onto a second line are not recognized yet. When a column is misread, for example a grouped number, the arithmetic check flags the row.
+- **Validate.** Pydantic normalizes dates, currency, and amounts. The POC accepts invoices in EUR. Amounts may be negative, which is how credit notes are exported. The checks use `Decimal` and allow a one-cent difference for each line (quantity × unit price × (1 − discount), rounded half up), for the sum of the lines against the net total, and for net total plus VAT against the gross total. Any difference blocks approval until it is corrected. Missing VAT requires an explicit entry during review.
 - **Review.** Every extracted invoice goes through human review. The app stores the extracted values separately from the approved values. Repeated downloads of an approved invoice produce the same CSV. Text values that could be interpreted as spreadsheet formulas are escaped.
 - **Retry.** Use the interface to retry a failed extraction. A task still queued or processing after five minutes also becomes eligible for retry. Each attempt has an ID that prevents an older task from overwriting a newer result.
 
@@ -80,8 +91,9 @@ This mode sends page text and images of pages processed by OCR to OpenAI. It use
 | `GET /documents/{id}` | Get the status, fields, local source excerpts, validation notes, duration, and retry eligibility. |
 | `GET /documents/{id}/preview/{page}` | Get a PNG preview. Page numbering starts at 1. |
 | `POST /documents/{id}/retry` | Retry a failed or stalled attempt. |
-| `POST /documents/{id}/approve` | Approve a JSON payload with `attempt` and the seven fields under `invoice`. Send amounts as strings. |
+| `POST /documents/{id}/approve` | Approve a JSON payload with `attempt` and, under `invoice`, the seven fields plus an optional `lines` list of `description`, `quantity`, `unit_price`, `discount_percent`, and `amount`. Send numbers as strings. |
 | `GET /documents/{id}/export.csv` | Download the CSV for an approved invoice. |
+| `GET /documents/{id}/lines.csv` | Download the line CSV for an approved invoice. |
 
 ```bash
 curl -F "file=@examples/facture-native.pdf" http://127.0.0.1:8000/documents
@@ -113,4 +125,4 @@ Run `python -m pytest -q tests` in the same virtual environment. The tests use r
 
 The interface shows extraction time and, in OpenAI mode, token usage. Measuring per-field accuracy and cost per invoice requires a labeled dataset and the rates for the selected model. The POC reviews every invoice manually, so the rate of processing without human intervention is 0%.
 
-This demo is designed for local use with test documents. It has no authentication or tenant isolation. The CSV uses a generic format and has yet to be tested against a live ERP. Line-item extraction, contracts, batch uploads, business-level duplicate detection, and automatic exports are outside the current scope.
+This demo is designed for local use with test documents. It has no authentication or tenant isolation. The CSV uses a generic format and has yet to be tested against a live ERP. Line descriptions that wrap onto several rows, layouts from other suppliers, contracts, batch uploads, business-level duplicate detection, and automatic exports are outside the current scope.

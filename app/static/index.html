@@ -46,8 +46,32 @@
               <button id="approve" type="submit">Valider la facture</button>
             </form>
             <a id="export" hidden>Télécharger le CSV</a>
+            <a id="export-lines" hidden>CSV des lignes</a>
           </div>
         </div>
+        <section id="lines-section" hidden aria-labelledby="lines-title">
+          <h3 id="lines-title">Lignes de facture</h3>
+          <p id="lines-summary" aria-live="polite"></p>
+          <div class="table">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">#</th>
+                  <th scope="col">Description</th>
+                  <th scope="col">Quantité</th>
+                  <th scope="col">Prix unitaire</th>
+                  <th scope="col">Remise (%)</th>
+                  <th scope="col">Montant</th>
+                  <th scope="col">Calculé</th>
+                  <th scope="col">Source</th>
+                  <th scope="col"><span class="visually-hidden">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody id="lines"></tbody>
+            </table>
+          </div>
+          <button id="add-line" type="button" class="secondary">Ajouter une ligne</button>
+        </section>
       </section>
     </div>
   </main>

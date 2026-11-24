@@ -3,6 +3,7 @@ import hashlib
 import io
 from contextlib import asynccontextmanager
 from pathlib import Path
+from statistics import mean, median
 from time import time
 from uuid import uuid4
 
@@ -11,13 +12,13 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
-from pydantic import BaseModel
-from sqlalchemy import select, update
+from pydantic import BaseModel, Field
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from .db import Base, Document, Session, engine
+from .db import Document, Session, ensure_schema
 from .extraction import MAX_BYTES, inspect_upload, preview
-from .invoice import LABELS, LINE_LABELS, Invoice
+from .invoice import LABELS, LINE_LABELS, Invoice, LineItem
 from .tasks import STALE_AFTER_SECONDS, enqueue
 
 STATIC = Path(__file__).with_name("static")
@@ -25,7 +26,7 @@ STATIC = Path(__file__).with_name("static")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(engine)
+    ensure_schema()
     yield
 
 
@@ -101,11 +102,27 @@ def documents():
         ]
 
 
+def duplicates(document: Document) -> list[dict]:
+    """Other documents for the same supplier and invoice number, such as a second scan."""
+    keys = {key for key in (document.invoice_key, document.approved_key) if key}
+    if not keys:
+        return []
+    with Session() as db:
+        others = db.scalars(
+            select(Document)
+            .where(Document.id != document.id, or_(Document.invoice_key.in_(keys), Document.approved_key.in_(keys)))
+            .order_by(Document.updated_at.desc())
+            .limit(10)
+        )
+        return [other.summary() for other in others]
+
+
 @app.get("/documents/{document_id}")
 def detail(document_id: str):
     document = get_document(document_id)
     return {
         **document.detail(),
+        "duplicates": duplicates(document),
         "can_retry": document.status == "failed" or (
             document.status in {"queued", "processing"}
             and document.updated_at <= int(time()) - STALE_AFTER_SECONDS
@@ -152,22 +169,46 @@ def retry(document_id: str):
 class Review(BaseModel):
     attempt: str
     invoice: Invoice
+    # The bookkeeper confirms that the differences are printed on the original invoice.
+    accept_discrepancies: bool = False
+    review_ms: int | None = Field(default=None, ge=0, le=86_400_000)
+
+
+def already_approved(key: str | None, document_id: str) -> Document | None:
+    if key is None:
+        return None
+    with Session() as db:
+        return db.scalar(select(Document).where(Document.approved_key == key, Document.id != document_id))
 
 
 @app.post("/documents/{document_id}/approve")
 def approve(document_id: str, review: Review):
-    get_document(document_id)
-    notes = review.invoice.inconsistencies()
-    if notes:
-        raise HTTPException(422, notes[0])
-    with Session.begin() as db:
-        result = db.execute(
-            update(Document)
-            .where(Document.id == document_id, Document.attempt == review.attempt, Document.status == "review")
-            .values(approved=review.invoice.model_dump(mode="json"), status="approved", updated_at=int(time()))
-        )
-        if result.rowcount != 1:
-            raise HTTPException(409, "La facture a changé. Rechargez-la avant de poursuivre.")
+    document = get_document(document_id)
+    invoice = review.invoice
+    notes = invoice.inconsistencies()
+    if notes and not review.accept_discrepancies:
+        raise HTTPException(422, " ".join(notes))
+    duplicate_message = "Cette facture du même fournisseur a déjà été validée : {}."
+    if other := already_approved(invoice.key, document_id):
+        raise HTTPException(409, duplicate_message.format(other.filename))
+    extracted = (document.extraction or {}).get("fields", {})
+    try:
+        with Session.begin() as db:
+            result = db.execute(
+                update(Document)
+                .where(Document.id == document_id, Document.attempt == review.attempt, Document.status == "review")
+                .values(
+                    approved={**invoice.model_dump(mode="json"), "discrepancies": notes},
+                    status="approved", approved_key=invoice.key, invoice_key=invoice.key,
+                    review_ms=review.review_ms, corrections=invoice.corrections(extracted),
+                    updated_at=int(time()),
+                )
+            )
+            if result.rowcount != 1:
+                raise HTTPException(409, "La facture a changé. Rechargez-la avant de poursuivre.")
+    except IntegrityError as exc:
+        other = already_approved(invoice.key, document_id)
+        raise HTTPException(409, duplicate_message.format(other.filename if other else "autre document")) from exc
     return get_document(document_id).detail()
 
 
@@ -197,8 +238,11 @@ def export(document_id: str):
     document = approved_document(document_id)
     values = document.approved
     return csv_response([
-        list(LABELS.values()),
-        [csv_text(values[field]) if field in {"invoice_number", "supplier"} else values[field] for field in LABELS],
+        [*LABELS.values(), "Écarts acceptés"],
+        [
+            *(csv_text(values[field]) if field in {"invoice_number", "supplier"} else values[field] for field in LABELS),
+            csv_text(" ".join(values.get("discrepancies", []))),
+        ],
     ], f"invoice-{document.id}.csv")
 
 
@@ -206,10 +250,77 @@ def export(document_id: str):
 def export_lines(document_id: str):
     document = approved_document(document_id)
     values = document.approved
-    rows = [[LABELS["invoice_number"], "Ligne", *LINE_LABELS.values()]]
+    rows = [[LABELS["invoice_number"], "Ligne", *LINE_LABELS.values(), "Montant calculé"]]
     for number, line in enumerate(values.get("lines", []), 1):
         rows.append([
             csv_text(values["invoice_number"]), number, csv_text(line["description"]),
             line["quantity"], line["unit_price"], line["discount_percent"], line["amount"],
+            f"{LineItem.model_validate(line).expected_amount():.2f}",
         ])
     return csv_response(rows, f"invoice-{document.id}-lines.csv")
+
+
+def approved_documents() -> list[Document]:
+    with Session() as db:
+        return list(db.scalars(
+            select(Document).where(Document.status == "approved").order_by(Document.updated_at)
+        ))
+
+
+@app.get("/metrics")
+def metrics():
+    """Review time and extraction accuracy, measured on approved invoices."""
+    documents = [document for document in approved_documents() if document.corrections]
+    review = [document.review_ms for document in documents if document.review_ms is not None]
+    extraction = [document.duration_ms for document in documents if document.duration_ms is not None]
+    fields = {
+        field: sum(field not in document.corrections["fields"] for document in documents)
+        for field in LABELS
+    }
+    lines = [document.corrections["lines"] for document in documents]
+    approved_lines = sum(line["approved"] for line in lines)
+    untouched = [
+        document for document in documents
+        if not document.corrections["fields"]
+        and document.corrections["lines"]["unchanged"]
+        == document.corrections["lines"]["approved"] == document.corrections["lines"]["extracted"]
+    ]
+    ratio = (lambda part, whole: round(part / whole, 4) if whole else None)
+    return {
+        "approved": len(documents),
+        "review_seconds": {
+            "count": len(review),
+            "median": round(median(review) / 1000, 1) if review else None,
+            "mean": round(mean(review) / 1000, 1) if review else None,
+            "total": round(sum(review) / 1000, 1),
+        },
+        "extraction_ms_median": round(median(extraction)) if extraction else None,
+        "field_accuracy": {field: ratio(correct, len(documents)) for field, correct in fields.items()},
+        "fields_accuracy": ratio(sum(fields.values()), len(documents) * len(LABELS)),
+        "line_accuracy": ratio(sum(line["unchanged"] for line in lines), approved_lines),
+        "lines": {
+            "extracted": sum(line["extracted"] for line in lines),
+            "approved": approved_lines,
+            "unchanged": sum(line["unchanged"] for line in lines),
+        },
+        "approved_without_correction": ratio(len(untouched), len(documents)),
+        "accepted_discrepancies": sum(bool(document.approved.get("discrepancies")) for document in documents),
+    }
+
+
+@app.get("/metrics.csv")
+def metrics_csv():
+    rows = [[
+        "Fichier", "Numéro de facture", "Méthode", "Extraction (ms)", "Relecture (s)", "Champs corrigés",
+        "Lignes extraites", "Lignes validées", "Lignes inchangées", "Écarts acceptés",
+    ]]
+    for document in approved_documents():
+        corrections = document.corrections or {"fields": [], "lines": {}}
+        rows.append([
+            csv_text(document.filename), csv_text(document.approved["invoice_number"]), document.method,
+            document.duration_ms, "" if document.review_ms is None else round(document.review_ms / 1000, 1),
+            " ".join(LABELS[field] for field in corrections["fields"]),
+            *(corrections["lines"].get(key, "") for key in ("extracted", "approved", "unchanged")),
+            len(document.approved.get("discrepancies", [])),
+        ])
+    return csv_response(rows, "review-metrics.csv")

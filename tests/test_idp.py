@@ -42,6 +42,7 @@ def extracted(client, filename):
     while data["status"] in {"queued", "processing"} and monotonic() < deadline:
         sleep(0.2)
         data = client.get(f"/documents/{data['id']}").json()
+    data = client.get(f"/documents/{data['id']}").json()
     assert data["status"] == "review", data
     return data
 
@@ -49,7 +50,6 @@ def extracted(client, filename):
 @pytest.mark.parametrize(("filename", "method", "number"), [
     ("facture-native.pdf", "pdf-texte", "DEMO-001"),
     ("facture-scanee.pdf", "ocr", "DEMO-002"),
-    ("facture-scanee.png", "ocr", "DEMO-002"),
 ])
 def test_import_review_export(client, filename, method, number):
     doc = extracted(client, filename)
@@ -61,12 +61,15 @@ def test_import_review_export(client, filename, method, number):
         "invoice_number": number, "supplier": "Atelier Exemple SRL", "invoice_date": "12/11/2026",
         "currency": "EUR", "subtotal": "1000,00", "vat_amount": "210,00", "total": "1210,00", "lines": [],
     }
-    assert doc["extraction"]["sources"]["total"]["page"] == 1
+    total = doc["extraction"]["sources"]["total"]
+    assert total["page"] == 1 and total["text"] == "Total TTC : 1210,00"
+    left, top, right, bottom = total["box"]
+    assert 0 < left < 0.2 < right < 0.8 and 0.3 < top < bottom < 0.9
     assert client.get(f"{route}/preview/1").content.startswith(b"\x89PNG")
     assert client.get(f"{route}/preview/2").status_code == 404
     assert client.get(f"{route}/export.csv").status_code == 409
 
-    review = {"attempt": doc["attempt"], "invoice": fields}
+    review = {"attempt": doc["attempt"], "invoice": fields, "review_ms": 42_000}
     response = client.post(f"{route}/approve", json=review)
     assert response.status_code == 200, response.text
     assert client.post(f"{route}/approve", json=review).status_code == 409
@@ -74,13 +77,28 @@ def test_import_review_export(client, filename, method, number):
     response = client.get(f"{route}/export.csv")
     assert response.status_code == 200
     header, row = csv.reader(io.StringIO(response.text))
-    assert header == ["Numéro de facture", "Fournisseur", "Date de facture", "Devise", "Total HT", "TVA", "Total TTC"]
+    assert header == [
+        "Numéro de facture", "Fournisseur", "Date de facture", "Devise", "Total HT", "TVA", "Total TTC",
+        "Écarts acceptés",
+    ]
     assert row == [
-        number, "Atelier Exemple SRL", "2026-11-12", "EUR", "1000.00", "210.00", "1210.00",
+        number, "Atelier Exemple SRL", "2026-11-12", "EUR", "1000.00", "210.00", "1210.00", "",
     ]
     assert client.get(f"{route}/export.csv").content == response.content
     duplicate = upload(client, filename)
     assert duplicate["duplicate"] and duplicate["id"] == doc["id"]
+
+
+def test_second_scan_of_same_invoice_is_a_duplicate(client):
+    first = client.get("/documents").json()
+    original = next(doc for doc in first if doc["filename"] == "facture-scanee.pdf")
+    doc = extracted(client, "facture-scanee.png")
+    assert doc["method"] == "ocr"
+    assert doc["extraction"]["fields"]["invoice_number"] == "DEMO-002"
+    assert [other["id"] for other in doc["duplicates"]] == [original["id"]]
+    response = approve(client, doc, {**doc["extraction"]["fields"], "invoice_number": "demo 002"})
+    assert response.status_code == 409 and "facture-scanee.pdf" in response.text
+    assert client.get(f"/documents/{doc['id']}").json()["status"] == "review"
 
 
 def test_inconsistent_total_requires_correction(client):
@@ -123,11 +141,17 @@ def test_line_table_across_pages(client):
     assert fields["subtotal"] == "4 572,86"
 
     assert approve(client, doc, fields).status_code == 200
+    assert sources[34]["box"][1] < 0.2
     rows = csv_rows(client, doc, "lines.csv")
-    assert rows[0] == ["Numéro de facture", "Ligne", "Description", "Quantité", "Prix unitaire", "Remise (%)", "Montant"]
+    assert rows[0] == [
+        "Numéro de facture", "Ligne", "Description", "Quantité", "Prix unitaire", "Remise (%)", "Montant",
+        "Montant calculé",
+    ]
     assert len(rows) == 47
-    assert rows[4] == ["DEMO-004", "4", "Cheville nylon 8 mm - lot 4", "26", "0.09", "10", "2.11"]
-    assert csv_rows(client, doc, "export.csv")[1][4:] == ["4572.86", "960.30", "5533.16"]
+    assert rows[4] == ["DEMO-004", "4", "Cheville nylon 8 mm - lot 4", "26", "0.09", "10", "2.11", "2.11"]
+    assert csv_rows(client, doc, "export.csv")[1][4:] == ["4572.86", "960.30", "5533.16", ""]
+    corrections = client.get(f"/documents/{doc['id']}").json()["corrections"]
+    assert corrections == {"fields": [], "lines": {"extracted": 46, "approved": 46, "unchanged": 46}}
 
 
 def test_line_amount_mismatch_is_flagged(client):
@@ -137,17 +161,22 @@ def test_line_amount_mismatch_is_flagged(client):
     response = approve(client, doc, fields)
     assert response.status_code == 422 and "Ligne 1" in response.text
 
-    fields["lines"][0]["amount"] = "50,40"
-    response = approve(client, doc, fields)
+    corrected = {**fields, "lines": [{**fields["lines"][0], "amount": "50,40"}, *fields["lines"][1:]]}
+    response = approve(client, doc, corrected)
     assert response.status_code == 422 and "somme des lignes (138,09)" in response.text
 
-    fields.update(subtotal="138,09", vat_amount="29,00", total="167,09")
-    fields["lines"][1]["quantity"] = "huit"
-    response = approve(client, doc, fields)
+    corrected["lines"][1] = {**corrected["lines"][1], "quantity": "huit"}
+    response = approve(client, doc, corrected)
     assert response.status_code == 422 and "quantity" in response.text
-    fields["lines"][1]["quantity"] = "8"
-    assert approve(client, doc, fields).status_code == 200
-    assert csv_rows(client, doc, "lines.csv")[1][-1] == "50.40"
+
+    # The supplier really printed 54,40: the bookkeeper approves the invoice as printed.
+    response = client.post(f"/documents/{doc['id']}/approve", json={
+        "attempt": doc["attempt"], "invoice": fields, "accept_discrepancies": True,
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["approved"]["discrepancies"] == doc["notes"]
+    assert csv_rows(client, doc, "export.csv")[1][-1] == doc["notes"][0]
+    assert csv_rows(client, doc, "lines.csv")[1][-2:] == ["54.40", "50.40"]
 
 
 def test_credit_note_keeps_negative_amounts(client):
@@ -158,9 +187,25 @@ def test_credit_note_keeps_negative_amounts(client):
     assert [line["quantity"] for line in fields["lines"]] == ["-100", "-2"]
     assert approve(client, doc, fields).status_code == 200
     assert csv_rows(client, doc, "export.csv")[1] == [
-        "AV-001", "Atelier Exemple SRL", "2026-11-20", "EUR", "-43.40", "-9.11", "-52.51",
+        "AV-001", "Atelier Exemple SRL", "2026-11-20", "EUR", "-43.40", "-9.11", "-52.51", "",
     ]
-    assert [row[-1] for row in csv_rows(client, doc, "lines.csv")[1:]] == ["-35.00", "-8.40"]
+    assert [row[-2] for row in csv_rows(client, doc, "lines.csv")[1:]] == ["-35.00", "-8.40"]
+
+
+def test_metrics_compare_extraction_with_approval(client):
+    metrics = client.get("/metrics").json()
+    assert metrics["approved"] >= 6
+    assert metrics["review_seconds"]["count"] >= 2 and metrics["review_seconds"]["median"] == 42.0
+    # DEMO-003 was approved with a corrected supplier and gross total.
+    assert metrics["field_accuracy"]["invoice_number"] == 1
+    assert metrics["field_accuracy"]["supplier"] < 1 and metrics["field_accuracy"]["total"] < 1
+    assert 0 < metrics["fields_accuracy"] < 1
+    assert metrics["line_accuracy"] == 1 and metrics["lines"]["approved"] >= 51
+    assert metrics["accepted_discrepancies"] >= 1
+    rows = list(csv.reader(io.StringIO(client.get("/metrics.csv").text)))
+    assert rows[0][:5] == ["Fichier", "Numéro de facture", "Méthode", "Extraction (ms)", "Relecture (s)"]
+    corrected = next(row for row in rows if row[1] == "DEMO-003")
+    assert corrected[5] == "Fournisseur Total TTC"
 
 
 def test_line_errors_name_the_line(client):

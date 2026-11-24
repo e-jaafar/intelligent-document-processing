@@ -1,4 +1,5 @@
 import re
+from collections import Counter
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated
@@ -49,6 +50,30 @@ def parse_number(value, decimals: int, message: str) -> Decimal:
     if not re.fullmatch(rf"\d{{1,9}}(?:[.,]\d{{1,{decimals}}})?", value):
         raise ValueError(message)
     return sign * Decimal(value.replace(",", "."))
+
+
+def parse_date(value):
+    if isinstance(value, str) and re.fullmatch(r"\d{2}[/.-]\d{2}[/.-]\d{4}", value.strip()):
+        return datetime.strptime(re.sub(r"[.-]", "/", value.strip()), "%d/%m/%Y").date()
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value.strip()):
+        return date.fromisoformat(value.strip())
+    raise ValueError("Date attendue au format AAAA-MM-JJ ou JJ/MM/AAAA.")
+
+
+def normalize_currency(value):
+    if isinstance(value, str):
+        return value.strip().upper().replace("€", "EUR")
+    return value
+
+
+def parse_money(value) -> Decimal:
+    return parse_number(value, 2, "Montant attendu au format 1234,56 ou 1234.56.").quantize(CENT)
+
+
+def invoice_key(supplier, invoice_number) -> str | None:
+    """Identify an invoice by supplier and number, ignoring case, spaces and punctuation."""
+    parts = [re.sub(r"[\W_]+", "", value.casefold()) if isinstance(value, str) else "" for value in (supplier, invoice_number)]
+    return "|".join(parts) if all(parts) else None
 
 
 class LineCandidate(BaseModel):
@@ -124,24 +149,56 @@ class Invoice(BaseModel):
 
     @field_validator("invoice_date", mode="before")
     @classmethod
-    def parse_date(cls, value):
-        if isinstance(value, str) and re.fullmatch(r"\d{2}[/.-]\d{2}[/.-]\d{4}", value):
-            return datetime.strptime(re.sub(r"[.-]", "/", value), "%d/%m/%Y").date()
-        if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
-            return date.fromisoformat(value)
-        raise ValueError("Date attendue au format AAAA-MM-JJ ou JJ/MM/AAAA.")
+    def validate_date(cls, value):
+        return parse_date(value)
 
     @field_validator("currency", mode="before")
     @classmethod
-    def normalize_currency(cls, value):
-        if isinstance(value, str):
-            return value.strip().upper().replace("€", "EUR")
-        return value
+    def validate_currency(cls, value):
+        return normalize_currency(value)
 
     @field_validator("subtotal", "vat_amount", "total", mode="before")
     @classmethod
-    def parse_amount(cls, value):
-        return parse_number(value, 2, "Montant attendu au format 1234,56 ou 1234.56.").quantize(CENT)
+    def validate_amount(cls, value):
+        return parse_money(value)
+
+    @property
+    def key(self) -> str | None:
+        return invoice_key(self.supplier, self.invoice_number)
+
+    def corrections(self, extracted: dict) -> dict:
+        """Compare the approved invoice with what was extracted, to measure accuracy per field."""
+        readers = {
+            "invoice_date": parse_date, "currency": normalize_currency,
+            "subtotal": parse_money, "vat_amount": parse_money, "total": parse_money,
+        }
+        changed = []
+        for field in LABELS:
+            value = extracted.get(field)
+            try:
+                value = readers.get(field, lambda text: text.strip())(value)
+            except (AttributeError, ValueError, ArithmeticError):
+                value = None
+            if value != getattr(self, field):
+                changed.append(field)
+
+        def normalized(line) -> tuple | None:
+            try:
+                return tuple(LineItem.model_validate(line).model_dump().values())
+            except ValueError:
+                return None
+
+        found = Counter(normalized(line) for line in extracted.get("lines") or [])
+        approved = Counter(tuple(line.model_dump().values()) for line in self.lines)
+        found.pop(None, None)
+        return {
+            "fields": changed,
+            "lines": {
+                "extracted": len(extracted.get("lines") or []),
+                "approved": len(self.lines),
+                "unchanged": sum((found & approved).values()),
+            },
+        }
 
     def inconsistencies(self) -> list[str]:
         notes = []

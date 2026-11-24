@@ -22,6 +22,18 @@
       </form>
       <h2>Documents</h2>
       <ul id="documents"></ul>
+      <section id="metrics-panel" aria-labelledby="metrics-title">
+        <h2 id="metrics-title">Mesures</h2>
+        <dl id="metrics"></dl>
+        <details id="field-accuracy-details">
+          <summary>Précision par champ</summary>
+          <dl id="field-accuracy"></dl>
+        </details>
+        <label for="baseline">Temps actuel par facture (minutes)</label>
+        <input id="baseline" type="number" min="0" step="0.5" inputmode="decimal">
+        <p id="gain" aria-live="polite"></p>
+        <a href="/metrics.csv">Détail par facture (CSV)</a>
+      </section>
     </aside>
     <div>
       <p id="notice" role="status"></p>
@@ -37,12 +49,23 @@
               <span id="page" aria-live="polite"></span>
               <button id="next" type="button" aria-label="Page suivante">→</button>
             </nav>
-            <img id="preview" alt="Aperçu de la facture">
+            <div class="page-view">
+              <img id="preview" alt="Aperçu de la facture">
+              <div id="highlight" hidden></div>
+            </div>
           </div>
           <div>
+            <div id="duplicates" hidden>
+              <p>Doublon possible : même fournisseur et même numéro que</p>
+              <ul id="duplicate-list"></ul>
+            </div>
             <ul id="notes"></ul>
             <form id="invoice" hidden>
               <div id="fields"></div>
+              <label class="check" id="accept-label">
+                <input id="accept" type="checkbox">
+                Les écarts figurent sur la facture originale : valider telle quelle
+              </label>
               <button id="approve" type="submit">Valider la facture</button>
             </form>
             <a id="export" hidden>Télécharger le CSV</a>
@@ -75,5 +98,12 @@
       </section>
     </div>
   </main>
+  <figure id="crop-figure" hidden>
+    <figcaption>
+      <span id="crop-caption"></span>
+      <button id="crop-close" type="button" class="secondary" aria-label="Fermer la zone source">×</button>
+    </figcaption>
+    <canvas id="crop" role="img" aria-labelledby="crop-caption"></canvas>
+  </figure>
 </body>
 </html>

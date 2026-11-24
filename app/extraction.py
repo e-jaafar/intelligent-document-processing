@@ -41,11 +41,83 @@ TABLE_END = re.compile(r"(?i)^[ \t]*(?:total\s*h\.?t|sous-total|subtotal|total\s
 CARRIED = re.compile(r"(?i)^[ \t]*(?:[àa] reporter|report|sous-total page|carried forward|brought forward)\b")
 
 
-def extract_lines(pages: list[str]) -> tuple[list[LineCandidate], list[dict]]:
+# A text line and its box on the page, as fractions of the page width and height: [left, top, right, bottom].
+Box = list[float]
+PageLines = list[tuple[str, Box | None]]
+
+
+def source(number: int, page: PageLines, index: int, text: str | None = None) -> dict:
+    line, box = page[index]
+    return {"page": number, "text": (text or line).strip(), "box": box}
+
+
+def union(boxes: list[tuple[float, float, float, float]]) -> tuple[float, float, float, float] | None:
+    if not boxes:
+        return None
+    return min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)
+
+
+def normalized(box, width: float, height: float, flip: bool = False) -> Box | None:
+    if box is None or width <= 0 or height <= 0:
+        return None
+    left, top, right, bottom = box
+    if flip:  # PDF coordinates grow upwards from the bottom of the page.
+        top, bottom = height - bottom, height - top
+    return [round(min(max(value, 0.0), 1.0), 4) for value in (left / width, top / height, right / width, bottom / height)]
+
+
+def pdf_lines(page, text_page) -> PageLines:
+    width, height = page.get_size()
+    count = text_page.count_chars()
+    text = text_page.get_text_range(0, count)
+    if len(text) != count:  # Characters and boxes no longer line up; keep the text alone.
+        return [(line, None) for line in text_page.get_text_bounded().splitlines()]
+    lines, current, boxes = [], [], []
+    for index, character in enumerate(text + "\n"):
+        if character == "\r":
+            continue
+        if character == "\n":
+            lines.append(("".join(current), normalized(union(boxes), width, height, flip=True)))
+            current, boxes = [], []
+            continue
+        current.append(character)
+        if not character.isspace():
+            left, bottom, right, top = text_page.get_charbox(index)
+            if right > left and top > bottom:
+                boxes.append((left, bottom, right, top))
+    return lines
+
+
+def ocr_lines(png: bytes) -> PageLines:
+    result = subprocess.run(
+        ["tesseract", "stdin", "stdout", "-l", os.getenv("OCR_LANG", "eng"), "--psm", "6", "tsv"],
+        input=png,
+        capture_output=True,
+        check=True,
+        timeout=15,
+    )
+    rows = [row.split("\t") for row in result.stdout.decode("utf-8").splitlines()[1:]]
+    width = height = 0
+    words: dict[tuple, list] = {}
+    for row in rows:
+        if len(row) < 12:
+            continue
+        level, left, top, w, h, text = int(row[0]), *map(int, row[6:10]), row[11].strip()
+        if level == 1:
+            width, height = w, h
+        elif level == 5 and text:
+            words.setdefault((row[2], row[3], row[4]), []).append((text, (left, top, left + w, top + h)))
+    return [
+        (" ".join(text for text, _ in line), normalized(union([box for _, box in line]), width, height))
+        for line in words.values()
+    ]
+
+
+def extract_lines(pages: list[PageLines]) -> tuple[list[LineCandidate], list[dict]]:
     """Read the line table, which may start on one page and continue on the next ones."""
     lines, sources, in_table = [], [], False
     for number, page in enumerate(pages, 1):
-        for text in page.splitlines():
+        for index, (text, _) in enumerate(page):
             if TABLE_HEADER.search(text):
                 in_table = True
                 continue
@@ -56,7 +128,7 @@ def extract_lines(pages: list[str]) -> tuple[list[LineCandidate], list[dict]]:
                 continue
             if match := LINE_ROW.match(text.strip()):
                 lines.append(LineCandidate.model_validate(match.groupdict()))
-                sources.append({"page": number, "text": text.strip()})
+                sources.append(source(number, page, index))
     return lines, sources
 
 
@@ -95,43 +167,36 @@ def preview(path: Path, media_type: str, page_number: int) -> bytes:
         return image_png(image)
 
 
-def ocr(png: bytes) -> str:
-    result = subprocess.run(
-        ["tesseract", "stdin", "stdout", "-l", os.getenv("OCR_LANG", "eng"), "--psm", "6"],
-        input=png,
-        capture_output=True,
-        check=True,
-        timeout=15,
-    )
-    return result.stdout.decode("utf-8")
+def page_text(page: PageLines) -> str:
+    return "\n".join(line.replace("\n", " ") for line, _ in page)
 
 
-def extract_local(pages: list[str]) -> tuple[Candidate, dict]:
+def extract_local(pages: list[PageLines]) -> tuple[Candidate, dict]:
     values, sources = {}, {}
+    texts = [page_text(page) for page in pages]
     # shortcut: labeled fields only, use the vision mode for arbitrary layouts.
     for field, label in PATTERNS.items():
         matches = {}
-        for number, page in enumerate(pages, 1):
+        for number, (page, text) in enumerate(zip(pages, texts), 1):
             pattern = rf"(?im)^[ \t]*{label}(?:[ \t]*[:#–-][ \t]*|[ \t]+)([^\r\n]+)$"
-            for match in re.finditer(pattern, "\n".join(page.splitlines())):
+            for match in re.finditer(pattern, text):
                 value = match[1].strip()
                 if field == "invoice_number" and not re.fullmatch(r"[\w][\w./-]*", value):
                     continue
                 if value:
-                    matches[value] = {"page": number, "text": match[0].strip()}
+                    matches[value] = source(number, page, text.count("\n", 0, match.start()), match[0])
         values[field] = next(iter(matches)) if len(matches) == 1 else None
         if len(matches) == 1:
             sources[field] = next(iter(matches.values()))
     if values["currency"] is None:
-        hints = {
-            number: match.group(0)
-            for number, page in enumerate(pages, 1)
-            if (match := re.search(r"\bEUR\b|€", page))
-        }
-        if hints and not re.search(r"\b(?:USD|GBP|CHF|CAD|JPY)\b|[$£]", "\n".join(pages)):
-            number, snippet = next(iter(hints.items()))
+        hints = [
+            source(number, page, text.count("\n", 0, match.start()), match.group(0))
+            for number, (page, text) in enumerate(zip(pages, texts), 1)
+            if (match := re.search(r"\bEUR\b|€", text))
+        ]
+        if hints and not re.search(r"\b(?:USD|GBP|CHF|CAD|JPY)\b|[$£]", "\n".join(texts)):
             values["currency"] = "EUR"
-            sources["currency"] = {"page": number, "text": snippet}
+            sources["currency"] = hints[0]
     values["lines"], sources["lines"] = extract_lines(pages)
     return Candidate.model_validate(values), sources
 
@@ -169,23 +234,24 @@ def extract_openai(pages: list[str], images: dict[int, bytes], model: str) -> tu
 
 
 def extract(path: Path, media_type: str) -> tuple[Candidate, dict, str, int | None]:
-    pages, images = [], {}
+    pages: list[PageLines] = []
+    images = {}
     if media_type == "application/pdf":
         with PDF_LOCK, closing(pdfium.PdfDocument(path)) as pdf:
             for index in range(len(pdf)):
                 with closing(pdf[index]) as page, closing(page.get_textpage()) as text_page:
-                    text = text_page.get_text_bounded()
-                    if sum(character.isalnum() for character in text) < 25:
+                    lines = pdf_lines(page, text_page)
+                    if sum(character.isalnum() for line, _ in lines for character in line) < 25:
                         images[index + 1] = render_pdf_page(page)
-                        text = ocr(images[index + 1])
-                    pages.append(text)
+                        lines = ocr_lines(images[index + 1])
+                    pages.append(lines)
     else:
         images[1] = preview(path, media_type, 1)
-        pages.append(ocr(images[1]))
+        pages.append(ocr_lines(images[1]))
 
     model = os.getenv("OPENAI_MODEL")
     if model:
-        candidate, tokens = extract_openai(pages, images, model)
+        candidate, tokens = extract_openai([page_text(page) for page in pages], images, model)
         return candidate, {}, "openai-vision" if images else "openai-texte", tokens
     candidate, sources = extract_local(pages)
     return candidate, sources, "ocr" if images else "pdf-texte", None
